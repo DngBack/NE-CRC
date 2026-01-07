@@ -1,0 +1,31 @@
+# Pilot Experiment Configuration
+
+# Dataset configuration
+dataset_names:
+  - unknown  # Start with one dataset for pilot
+
+# Shift configuration
+shift_type: id  # Start with ID (no shift)
+split_ratios: [0.4, 0.3, 0.3]  # train, calibration, test
+
+# Model configuration
+model_name: "meta-llama/Llama-3.2-1B"  # Small model for testing
+num_samples: 5  # K samples for uncertainty estimation
+
+# Calibration configuration
+calibration_head: logistic  # "logistic" or "mlp"
+
+# CRC configuration
+alpha: 0.05  # Risk level (5% error target)
+delta: 0.05  # Outlier threshold for SConU
+
+# Uncertainty and weight methods
+uncertainty_method: semantic_entropy  # or "token_entropy", "dispersion"
+weight_method: similarity  # or "density_ratio", "kernel"
+
+# Experiment tracking
+experiment_name: "pilot_id_unknown"
+seed: 42
+cache_dir: ".cache"
+output_dir: "outputs"
+
