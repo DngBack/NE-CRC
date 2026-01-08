@@ -66,6 +66,15 @@ class LogisticCalibrationHead:
         # Convert continuous labels to binary if needed
         y_binary = (y >= 0.5).astype(int)
         
+        # Check if we have at least 2 classes
+        unique_classes = np.unique(y_binary)
+        if len(unique_classes) < 2:
+            raise ValueError(
+                f"Need samples from at least 2 classes for training, "
+                f"but only found class(es): {unique_classes.tolist()}. "
+                f"Please ensure your dataset has both correct and incorrect samples."
+            )
+        
         # Scale features
         if self.scaler:
             X = self.scaler.fit_transform(X)

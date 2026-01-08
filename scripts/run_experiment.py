@@ -6,11 +6,12 @@ import yaml
 from pathlib import Path
 import sys
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Add project root to path (not src, to allow relative imports within src)
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-from data import ExperimentConfig, ShiftType
-from pipeline import create_experiment_pipeline
+from src.data import ExperimentConfig, ShiftType
+from src.pipeline import create_experiment_pipeline
 from loguru import logger
 
 

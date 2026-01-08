@@ -75,13 +75,13 @@ class ExperimentPipeline:
         
         # 6. Run all systems
         logger.info("\n[6/8] Running all system variants...")
-        results = self._run_all_systems(
+        results, test_labels_filtered = self._run_all_systems(
             features, uncertainties, weight_features, data_split
         )
         
         # 7. Evaluate metrics
         logger.info("\n[7/8] Evaluating metrics...")
-        metrics = self._evaluate_metrics(results, data_split)
+        metrics = self._evaluate_metrics(results, test_labels_filtered)
         
         # 8. Save results
         logger.info("\n[8/8] Saving results...")
@@ -235,24 +235,51 @@ class ExperimentPipeline:
         """Run all system variants."""
         results = {}
         
-        # Extract labels
-        train_labels = [s.correctness for s in data_split.train]
-        cal_labels = [s.correctness for s in data_split.calibration]
-        test_labels = [s.correctness for s in data_split.test]
+        # Filter out samples with None correctness labels
+        def filter_valid_samples(samples, feat_list, unc_list=None, wf_list=None):
+            """Filter samples and corresponding features/uncertainties that have valid labels."""
+            valid_indices = [i for i, s in enumerate(samples) if s.correctness is not None]
+            filtered_samples = [samples[i] for i in valid_indices]
+            filtered_features = [feat_list[i] for i in valid_indices]
+            filtered_unc = [unc_list[i] for i in valid_indices] if unc_list is not None else None
+            filtered_wf = [wf_list[i] for i in valid_indices] if wf_list is not None else None
+            return filtered_samples, filtered_features, filtered_unc, filtered_wf
+        
+        # Filter train, calibration, and test sets
+        train_samples, train_features_filtered, _, _ = filter_valid_samples(
+            data_split.train, features['train']
+        )
+        cal_samples, cal_features_filtered, cal_unc_filtered, cal_wf_filtered = filter_valid_samples(
+            data_split.calibration, features['calibration'], 
+            uncertainties['calibration'], weight_features['calibration']
+        )
+        test_samples, test_features_filtered, test_unc_filtered, test_wf_filtered = filter_valid_samples(
+            data_split.test, features['test'],
+            uncertainties['test'], weight_features['test']
+        )
+        
+        # Extract labels (now guaranteed to be non-None)
+        train_labels = [s.correctness for s in train_samples]
+        cal_labels = [s.correctness for s in cal_samples]
+        test_labels = [s.correctness for s in test_samples]
+        
+        logger.info(f"Using {len(train_samples)}/{len(data_split.train)} train samples with valid labels")
+        logger.info(f"Using {len(cal_samples)}/{len(data_split.calibration)} calibration samples with valid labels")
+        logger.info(f"Using {len(test_samples)}/{len(data_split.test)} test samples with valid labels")
         
         # 1. Heuristic baseline
         logger.info("Running Heuristic baseline...")
         heuristic = create_heuristic_baseline(threshold=1.0, invert=True)
-        results['heuristic'] = heuristic.predict(uncertainties['test'])
+        results['heuristic'] = heuristic.predict(test_unc_filtered)
         
         # 2. UniCR (standard CRC)
         logger.info("Running UniCR baseline...")
         unicr = create_unicr_baseline(alpha=self.config.alpha)
         unicr.fit(
-            features['train'], train_labels,
-            features['calibration'], cal_labels
+            train_features_filtered, train_labels,
+            cal_features_filtered, cal_labels
         )
-        results['unicr'] = unicr.predict(features['test'])
+        results['unicr'] = unicr.predict(test_features_filtered)
         
         # 3. UniCR + Filter
         logger.info("Running UniCR + Filter...")
@@ -261,12 +288,12 @@ class ExperimentPipeline:
             delta=self.config.delta
         )
         unicr_filter.fit(
-            features['train'], train_labels,
-            features['calibration'], cal_labels,
-            uncertainties['calibration']
+            train_features_filtered, train_labels,
+            cal_features_filtered, cal_labels,
+            cal_unc_filtered
         )
         results['unicr_filter'] = unicr_filter.predict(
-            features['test'], uncertainties['test']
+            test_features_filtered, test_unc_filtered
         )
         
         # 4. UniCR + NE-CRC
@@ -277,12 +304,12 @@ class ExperimentPipeline:
             weight_fn=weight_fn
         )
         unicr_necrc.fit(
-            features['train'], train_labels,
-            features['calibration'], cal_labels,
-            weight_features['calibration']
+            train_features_filtered, train_labels,
+            cal_features_filtered, cal_labels,
+            cal_wf_filtered
         )
         results['unicr_necrc'] = unicr_necrc.predict(
-            features['test'], weight_features['test']
+            test_features_filtered, test_wf_filtered
         )
         
         # 5. S-UniCR (full system)
@@ -293,24 +320,30 @@ class ExperimentPipeline:
             weight_fn=weight_fn
         )
         s_unicr.fit(
-            features['train'], train_labels,
-            features['calibration'], cal_labels,
-            uncertainties['calibration'],
-            weight_features['calibration']
+            train_features_filtered, train_labels,
+            cal_features_filtered, cal_labels,
+            cal_unc_filtered,
+            cal_wf_filtered
         )
         results['s_unicr'] = s_unicr.predict(
-            features['test'],
-            uncertainties['test'],
-            weight_features['test']
+            test_features_filtered,
+            test_unc_filtered,
+            test_wf_filtered
         )
         
-        return results
+        # Return results along with filtered test labels for evaluation
+        return results, test_labels
     
-    def _evaluate_metrics(self, results, data_split):
-        """Evaluate all metrics."""
+    def _evaluate_metrics(self, results, test_labels):
+        """Evaluate all metrics.
+        
+        Args:
+            results: Dictionary of system results
+            test_labels: List of test correctness labels (already filtered)
+        """
         metrics_computer = create_metrics_computer()
         
-        test_labels = np.array([s.correctness for s in data_split.test])
+        test_labels = np.array(test_labels)
         
         all_metrics = {}
         

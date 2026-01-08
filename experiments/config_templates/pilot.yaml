@@ -9,7 +9,7 @@ shift_type: id  # Start with ID (no shift)
 split_ratios: [0.4, 0.3, 0.3]  # train, calibration, test
 
 # Model configuration
-model_name: "meta-llama/Llama-3.2-1B"  # Small model for testing
+model_name: "Qwen/Qwen2.5-0.5B-Instruct"  # Small Qwen model for testing (0.5B parameters)
 num_samples: 5  # K samples for uncertainty estimation
 
 # Calibration configuration

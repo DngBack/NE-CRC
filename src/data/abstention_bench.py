@@ -114,11 +114,23 @@ class AbstentionBenchLoader:
             if scenario == ScenarioType.UNKNOWN:
                 query = f"What is the population of the fictional city Zephoria-{i}?"
                 # Should abstain - unknown information
-                correctness = 0.0 if i % 3 == 0 else None
+                # Mix of incorrect (0.0), correct (1.0), and unlabeled (None)
+                if i % 3 == 0:
+                    correctness = 0.0  # Incorrect
+                elif i % 3 == 1:
+                    correctness = 1.0  # Correct (some known info)
+                else:
+                    correctness = None  # Unlabeled
             elif scenario == ScenarioType.FALSE_PREMISE:
                 query = f"When did George Washington use his iPhone to call Congress-{i}?"
                 # Should abstain - false premise
-                correctness = 0.0 if i % 3 == 0 else None
+                # Mix of incorrect (0.0), correct (1.0), and unlabeled (None)
+                if i % 3 == 0:
+                    correctness = 0.0  # Incorrect
+                elif i % 3 == 1:
+                    correctness = 1.0  # Correct
+                else:
+                    correctness = None  # Unlabeled
             elif scenario == ScenarioType.OUTDATED:
                 query = f"What is the current stock price of Company-{i} (as of 2020)?"
                 # Information becomes outdated
