@@ -13,6 +13,7 @@ from .data_types import (
 )
 from .abstention_bench import AbstentionBenchLoader, create_default_loader
 from .shift_splits import ShiftSplitter, create_default_splitter
+from .correctness_evaluator import CorrectnessEvaluator, create_correctness_evaluator
 
 __all__ = [
     # Data types
@@ -32,5 +33,8 @@ __all__ = [
     # Splitters
     "ShiftSplitter",
     "create_default_splitter",
+    # Correctness evaluation
+    "CorrectnessEvaluator",
+    "create_correctness_evaluator",
 ]
 

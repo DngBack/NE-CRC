@@ -12,6 +12,7 @@ from ..data import (
     create_default_splitter,
     ShiftType,
     SplitType,
+    create_correctness_evaluator,
 )
 from ..models import create_llm_inference, create_evidence_extractor
 from ..uncertainty import create_uncertainty_estimator
@@ -58,33 +59,37 @@ class ExperimentPipeline:
         data_split = self._load_and_split_data()
         
         # 2. Run LLM inference (with caching)
-        logger.info("\n[2/8] Running LLM inference...")
+        logger.info("\n[2/9] Running LLM inference...")
         generations = self._run_llm_inference(data_split)
         
-        # 3. Extract evidence features
-        logger.info("\n[3/8] Extracting evidence features...")
+        # 3. Evaluate correctness from LLM outputs
+        logger.info("\n[3/9] Evaluating correctness from LLM outputs...")
+        data_split = self._evaluate_correctness(generations, data_split)
+        
+        # 4. Extract evidence features
+        logger.info("\n[4/9] Extracting evidence features...")
         features = self._extract_features(generations, data_split)
         
-        # 4. Compute uncertainties
-        logger.info("\n[4/8] Computing uncertainties...")
+        # 5. Compute uncertainties
+        logger.info("\n[5/9] Computing uncertainties...")
         uncertainties = self._compute_uncertainties(generations)
         
-        # 5. Prepare weight features for NE-CRC
-        logger.info("\n[5/8] Preparing weight features...")
+        # 6. Prepare weight features for NE-CRC
+        logger.info("\n[6/9] Preparing weight features...")
         weight_features = self._prepare_weight_features(features)
         
-        # 6. Run all systems
-        logger.info("\n[6/8] Running all system variants...")
+        # 7. Run all systems
+        logger.info("\n[7/9] Running all system variants...")
         results, test_labels_filtered = self._run_all_systems(
             features, uncertainties, weight_features, data_split
         )
         
-        # 7. Evaluate metrics
-        logger.info("\n[7/8] Evaluating metrics...")
+        # 8. Evaluate metrics
+        logger.info("\n[8/9] Evaluating metrics...")
         metrics = self._evaluate_metrics(results, test_labels_filtered)
         
-        # 8. Save results
-        logger.info("\n[8/8] Saving results...")
+        # 9. Save results
+        logger.info("\n[9/9] Saving results...")
         self._save_results(results, metrics)
         
         elapsed = time.time() - start_time
@@ -101,6 +106,20 @@ class ExperimentPipeline:
         dataset_name = self.config.dataset_names[0]  # Use first dataset
         samples = self.loader.load_dataset(dataset_name)
         
+        # Validate loaded data
+        logger.info(f"Validating loaded dataset...")
+        if not samples:
+            raise ValueError(f"No samples loaded from dataset: {dataset_name}")
+        
+        logger.info(f"Loaded {len(samples)} total samples")
+        
+        # Check for metadata (indicates real vs synthetic data)
+        has_metadata = any(s.metadata.get('synthetic', True) == False for s in samples)
+        if has_metadata:
+            logger.info("✓ Real dataset detected (has metadata)")
+        else:
+            logger.warning("⚠ Using synthetic dataset (no real metadata found)")
+        
         # Create split
         shift_type = self.config.shift_type
         data_split = self.splitter.create_split(
@@ -110,11 +129,28 @@ class ExperimentPipeline:
             dataset_name
         )
         
-        logger.info(f"Dataset: {dataset_name}")
+        # Validate splits
+        logger.info(f"\nDataset: {dataset_name}")
         logger.info(f"Shift type: {shift_type.value}")
         logger.info(f"Train: {len(data_split.train)} samples")
         logger.info(f"Calibration: {len(data_split.calibration)} samples")
         logger.info(f"Test: {len(data_split.test)} samples")
+        
+        # Check for empty splits
+        if len(data_split.train) == 0:
+            raise ValueError("Train split is empty!")
+        if len(data_split.calibration) == 0:
+            raise ValueError("Calibration split is empty!")
+        if len(data_split.test) == 0:
+            raise ValueError("Test split is empty!")
+        
+        # Check minimum sizes
+        min_cal_size = 10
+        if len(data_split.calibration) < min_cal_size:
+            logger.warning(
+                f"Calibration set is very small ({len(data_split.calibration)} samples). "
+                f"Recommended: at least {min_cal_size} samples for reliable CRC."
+            )
         
         return data_split
     
@@ -179,6 +215,132 @@ class ExperimentPipeline:
             )
         
         return generations
+    
+    def _evaluate_correctness(self, generations, data_split):
+        """Evaluate correctness from LLM outputs and update samples.
+        
+        Args:
+            generations: Dictionary of generated outputs per split
+            data_split: DataSplit with samples
+        
+        Returns:
+            Updated DataSplit with correctness labels
+        """
+        logger.info("Evaluating correctness from LLM outputs...")
+        
+        # Create correctness evaluator
+        evaluator = create_correctness_evaluator(method="exact", use_semantic_similarity=False)
+        
+        # Create evidence extractor to get best answers
+        extractor = create_evidence_extractor()
+        
+        # Process each split
+        for split_type in [SplitType.TRAIN, SplitType.CALIBRATION, SplitType.TEST]:
+            split_name = split_type.value
+            samples = data_split.get_split(split_type)
+            gens = generations[split_name]
+            
+            logger.info(f"Evaluating correctness for {split_name} split ({len(samples)} samples)...")
+            
+            # Extract best answers from generations
+            llm_answers = []
+            reference_answers_list = []
+            should_abstain_list = []
+            model_abstained_list = []
+            
+            for sample, gen_output in zip(samples, gens):
+                # Get best answer (majority vote or first)
+                best_answer = extractor.select_best_answer(gen_output, method="majority_vote")
+                llm_answers.append(best_answer)
+                
+                # Get metadata
+                metadata = sample.metadata
+                reference_answers = metadata.get('reference_answers', [])
+                if not reference_answers:
+                    reference_answers = []
+                should_abstain = metadata.get('should_abstain', False)
+                
+                reference_answers_list.append(reference_answers)
+                should_abstain_list.append(should_abstain)
+                
+                # Check if model abstained (answer is empty or contains abstention phrases)
+                abstention_phrases = [
+                    "i don't know", "i cannot", "i'm not sure", "i don't have",
+                    "unable to", "cannot answer", "no information", "not available"
+                ]
+                answer_lower = best_answer.lower().strip()
+                model_abstained = (
+                    not best_answer or
+                    len(best_answer.strip()) == 0 or
+                    any(phrase in answer_lower for phrase in abstention_phrases)
+                )
+                model_abstained_list.append(model_abstained)
+            
+            # Evaluate correctness
+            correctness_scores = evaluator.evaluate_batch(
+                llm_answers,
+                reference_answers_list,
+                should_abstain_list,
+                model_abstained_list,
+            )
+            
+            # Update samples with correctness labels
+            num_evaluated = 0
+            num_correct = 0
+            num_incorrect = 0
+            num_unknown = 0
+            
+            for sample, correctness, best_answer in zip(samples, correctness_scores, llm_answers):
+                sample.correctness = correctness
+                sample.answer = best_answer  # Store the best answer
+                
+                if correctness is not None:
+                    num_evaluated += 1
+                    if correctness >= 0.5:
+                        num_correct += 1
+                    else:
+                        num_incorrect += 1
+                else:
+                    num_unknown += 1
+            
+            logger.info(
+                f"  {split_name}: {num_evaluated} evaluated "
+                f"({num_correct} correct, {num_incorrect} incorrect, {num_unknown} unknown)"
+            )
+        
+        # Log overall statistics
+        all_samples = data_split.train + data_split.calibration + data_split.test
+        all_correctness = [s.correctness for s in all_samples if s.correctness is not None]
+        
+        if all_correctness:
+            logger.info(f"\nOverall correctness statistics:")
+            logger.info(f"  Total with labels: {len(all_correctness)}")
+            logger.info(f"  Correct: {sum(1 for c in all_correctness if c >= 0.5)}")
+            logger.info(f"  Incorrect: {sum(1 for c in all_correctness if c < 0.5)}")
+            logger.info(f"  Mean correctness: {np.mean(all_correctness):.3f}")
+        else:
+            logger.error("No correctness labels evaluated! This will cause pipeline to fail.")
+            raise ValueError(
+                "No correctness labels could be evaluated. "
+                "Check that samples have reference_answers or should_abstain in metadata."
+            )
+        
+        # Check for edge case: all labels are the same
+        if len(set(all_correctness)) == 1:
+            logger.warning(
+                f"⚠ All correctness labels are the same ({all_correctness[0]})! "
+                "This may indicate an issue with correctness evaluation."
+            )
+        
+        # Check for edge case: very few correct/incorrect samples
+        correct_count = sum(1 for c in all_correctness if c >= 0.5)
+        incorrect_count = sum(1 for c in all_correctness if c < 0.5)
+        if correct_count < 5:
+            logger.warning(f"⚠ Very few correct samples ({correct_count}). Calibration may be unreliable.")
+        if incorrect_count < 5:
+            logger.warning(f"⚠ Very few incorrect samples ({incorrect_count}). CRC threshold may be unreliable.")
+        
+        return data_split
     
     def _extract_features(self, generations, data_split):
         """Extract evidence features."""
@@ -263,9 +425,58 @@ class ExperimentPipeline:
         cal_labels = [s.correctness for s in cal_samples]
         test_labels = [s.correctness for s in test_samples]
         
-        logger.info(f"Using {len(train_samples)}/{len(data_split.train)} train samples with valid labels")
-        logger.info(f"Using {len(cal_samples)}/{len(data_split.calibration)} calibration samples with valid labels")
-        logger.info(f"Using {len(test_samples)}/{len(data_split.test)} test samples with valid labels")
+        logger.info(f"\nFiltered samples with valid correctness labels:")
+        logger.info(f"  Train: {len(train_samples)}/{len(data_split.train)} ({len(train_samples)/len(data_split.train)*100:.1f}%)")
+        logger.info(f"  Calibration: {len(cal_samples)}/{len(data_split.calibration)} ({len(cal_samples)/len(data_split.calibration)*100:.1f}%)")
+        logger.info(f"  Test: {len(test_samples)}/{len(data_split.test)} ({len(test_samples)/len(data_split.test)*100:.1f}%)")
+        
+        # Validate we have enough samples
+        if len(train_samples) < 10:
+            raise ValueError(f"Too few train samples with valid labels: {len(train_samples)}")
+        if len(cal_samples) < 10:
+            raise ValueError(f"Too few calibration samples with valid labels: {len(cal_samples)}")
+        if len(test_samples) < 5:
+            raise ValueError(f"Too few test samples with valid labels: {len(test_samples)}")
+        
+        # Log label distribution
+        def log_label_distribution(labels, split_name):
+            labels_arr = np.array(labels)
+            correct = np.sum(labels_arr >= 0.5)
+            incorrect = np.sum(labels_arr < 0.5)
+            logger.info(f"  {split_name} label distribution: {correct} correct, {incorrect} incorrect ({correct/len(labels)*100:.1f}% correct)")
+        
+        logger.info(f"\nLabel distributions:")
+        log_label_distribution(train_labels, "Train")
+        log_label_distribution(cal_labels, "Calibration")
+        log_label_distribution(test_labels, "Test")
+        
+        # Check for edge cases
+        if len(set(cal_labels)) == 1:
+            logger.warning(f"⚠ All calibration labels are the same ({cal_labels[0]})! This may cause issues with CRC.")
+            # If all labels are 1.0, CRC will have no error samples to compute threshold
+            if cal_labels[0] >= 0.5:
+                logger.error("All calibration labels are correct (1.0). Cannot compute CRC threshold on error samples!")
+                raise ValueError(
+                    "Cannot compute CRC threshold: all calibration samples are correct. "
+                    "Need at least some incorrect samples for risk control."
+                )
+        
+        if len(set(train_labels)) == 1:
+            logger.warning(f"⚠ All train labels are the same ({train_labels[0]})! Calibration head may not learn properly.")
+        
+        # Check calibration set has both correct and incorrect samples
+        cal_correct = sum(1 for l in cal_labels if l >= 0.5)
+        cal_incorrect = sum(1 for l in cal_labels if l < 0.5)
+        if cal_incorrect == 0:
+            logger.error("No incorrect samples in calibration set! Cannot compute CRC threshold.")
+            raise ValueError(
+                "Calibration set must contain at least some incorrect samples "
+                "to compute CRC threshold for risk control."
+            )
+        if cal_correct == 0:
+            logger.warning("No correct samples in calibration set! This is unusual.")
+        
+        logger.info(f"  Calibration set: {cal_correct} correct, {cal_incorrect} incorrect")
         
         # 1. Heuristic baseline
         logger.info("Running Heuristic baseline...")
@@ -279,6 +490,18 @@ class ExperimentPipeline:
             train_features_filtered, train_labels,
             cal_features_filtered, cal_labels
         )
+        
+        # Log calibration head performance
+        train_probs = unicr.calibration_head.predict_proba(train_features_filtered)
+        train_preds = unicr.calibration_head.predict(train_features_filtered)
+        train_acc = np.mean(train_preds == np.array(train_labels))
+        logger.info(f"  Calibration head train accuracy: {train_acc:.3f}")
+        logger.info(f"  Calibration head confidence range: [{train_probs.min():.3f}, {train_probs.max():.3f}]")
+        
+        # Log CRC threshold
+        threshold = unicr.crc.get_threshold()
+        logger.info(f"  CRC threshold: {threshold:.4f} (alpha={self.config.alpha})")
+        
         results['unicr'] = unicr.predict(test_features_filtered)
         
         # 3. UniCR + Filter
@@ -292,6 +515,15 @@ class ExperimentPipeline:
             cal_features_filtered, cal_labels,
             cal_unc_filtered
         )
+        
+        # Log filter statistics
+        test_pvalues = []
+        for unc in test_unc_filtered:
+            pval = unicr_filter.filter.compute_pvalue(unc)
+            test_pvalues.append(pval)
+        outlier_rate = sum(1 for p in test_pvalues if p < self.config.delta) / len(test_pvalues)
+        logger.info(f"  SConU filter: {outlier_rate*100:.1f}% outliers detected (delta={self.config.delta})")
+        
         results['unicr_filter'] = unicr_filter.predict(
             test_features_filtered, test_unc_filtered
         )
@@ -325,6 +557,15 @@ class ExperimentPipeline:
             cal_unc_filtered,
             cal_wf_filtered
         )
+        
+        # Log S-UniCR statistics
+        test_thresholds = []
+        for i in range(len(test_features_filtered)):
+            test_feat = test_wf_filtered[i]
+            threshold = s_unicr.ne_crc.compute_threshold(test_feat)
+            test_thresholds.append(threshold)
+        logger.info(f"  NE-CRC adaptive thresholds: mean={np.mean(test_thresholds):.4f}, std={np.std(test_thresholds):.4f}")
+        
         results['s_unicr'] = s_unicr.predict(
             test_features_filtered,
             test_unc_filtered,
@@ -347,8 +588,10 @@ class ExperimentPipeline:
         
         all_metrics = {}
         
+        logger.info(f"\nEvaluating metrics on {len(test_labels)} test samples...")
+        
         for system_name, preds in results.items():
-            logger.info(f"Evaluating {system_name}...")
+            logger.info(f"\nEvaluating {system_name}...")
             
             # Extract arrays
             decisions = np.array([1 if r.is_answered() else 0 for r in preds])
@@ -364,10 +607,19 @@ class ExperimentPipeline:
             
             all_metrics[system_name] = metrics
             
-            # Log summary
-            logger.info(f"  Coverage: {metrics['coverage']:.3f}")
-            logger.info(f"  Selective risk: {metrics['selective_risk']:.3f}")
+            # Log detailed summary
+            answered = np.sum(decisions)
+            logger.info(f"  Answered: {answered}/{len(decisions)} ({metrics['coverage']:.1%})")
+            logger.info(f"  Selective risk: {metrics['selective_risk']:.3f} (target: {self.config.alpha:.3f})")
+            logger.info(f"  Risk gap: {metrics.get('risk_gap', 0):.3f}")
             logger.info(f"  AURC: {metrics['aurc']:.4f}")
+            logger.info(f"  Coverage@Risk≤5%: {metrics.get('coverage@risk<=0.05', 0):.3f}")
+            
+            # Check if risk constraint is satisfied
+            if metrics.get('is_violated', False):
+                logger.warning(f"  ⚠ Risk constraint VIOLATED (risk > target)")
+            else:
+                logger.info(f"  ✓ Risk constraint satisfied")
         
         return all_metrics
     

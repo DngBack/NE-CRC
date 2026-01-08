@@ -89,14 +89,32 @@ class VLLMInference(BaseLLMInference):
         logger.info(f"Loading model with vLLM: {model_name}")
         self.model_name = model_name
         
-        self.llm = LLM(
-            model=model_name,
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-        )
-        
-        logger.info("Model loaded successfully")
+        try:
+            self.llm = LLM(
+                model=model_name,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+            )
+            logger.info("Model loaded successfully with vLLM")
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Failed to initialize vLLM: {error_msg}")
+            
+            # Check for common error patterns
+            if "Python.h" in error_msg or "fatal error" in error_msg.lower():
+                logger.error("Missing Python development headers!")
+                logger.error("Install with: sudo apt-get install python3-dev")
+                logger.error("Or for Python 3.12: sudo apt-get install python3.12-dev")
+            elif "compilation" in error_msg.lower() or "compile" in error_msg.lower():
+                logger.error("Compilation error detected!")
+                logger.error("This might require:")
+                logger.error("  1. python3-dev or python3.12-dev")
+                logger.error("  2. build-essential")
+                logger.error("  3. CUDA development tools")
+            
+            # Re-raise to be caught by create_llm_inference
+            raise RuntimeError(f"vLLM initialization failed: {e}") from e
     
     def generate(
         self,
@@ -329,7 +347,17 @@ def create_llm_inference(
         LLM inference object
     """
     if use_vllm and VLLM_AVAILABLE:
-        return VLLMInference(model_name, **kwargs)
+        try:
+            logger.info(f"Attempting to use vLLM for {model_name}...")
+            return VLLMInference(model_name, **kwargs)
+        except Exception as e:
+            logger.warning(f"vLLM initialization failed: {e}")
+            logger.warning("This might be due to:")
+            logger.warning("  1. Missing Python development headers (python3-dev)")
+            logger.warning("  2. Missing CUDA development tools")
+            logger.warning("  3. Compilation errors")
+            logger.warning("Falling back to transformers backend...")
+            return TransformersInference(model_name, **kwargs)
     else:
         if use_vllm:
             logger.warning("vLLM requested but not available, falling back to transformers")
