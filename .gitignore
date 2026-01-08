@@ -38,9 +38,9 @@ env/
 *.ipynb
 
 # Experiments
-outputs/*/
-!outputs/.gitkeep
-experiments/runs/
+# outputs/*/
+# !outputs/.gitkeepe
+# experiments/runs/
 *.ckpt
 *.pth
 
